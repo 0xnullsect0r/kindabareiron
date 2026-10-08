@@ -35,6 +35,7 @@ uint8_t isColumnBlock (uint8_t block);
 uint8_t isPassableBlock (uint8_t block);
 uint8_t isPassableSpawnBlock (uint8_t block);
 uint8_t isReplaceableBlock (uint8_t block);
+uint8_t isFluidBlock (uint8_t block);
 uint32_t isCompostItem (uint16_t item);
 uint8_t getItemStackSize (uint16_t item);
 
@@ -46,6 +47,8 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
 void checkFluidUpdate (short x, uint8_t y, short z, uint8_t block);
 
 void spawnMob (uint8_t type, short x, uint8_t y, short z, uint8_t health);
+int countMobs ();
+uint8_t trySpawnNaturalMob (short x, short z, uint8_t start_y, uint32_t r);
 void interactEntity (int entity_id, int interactor_id);
 void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t damage);
 void handleServerTick (int64_t time_since_last_tick);

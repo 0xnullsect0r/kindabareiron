@@ -412,7 +412,7 @@ void broadcastPlayerMetadata (PlayerData *player) {
     },
     {
       6,        // Index (Pose),
-      21,       // Type (Pose),
+      20,       // Type (Pose),
       { pose }, // Value (Standing)
     }
   };
@@ -441,13 +441,13 @@ void broadcastMobMetadata (int client_fd, int entity_id) {
   size_t length;
 
   switch (mob->type) {
-    case 106: // Sheep
+    case E_sheep:
       if (!((mob->data >> 5) & 1)) // Don't send metadata if sheep isn't sheared
         return;
 
       metadata = malloc(sizeof *metadata);
       metadata[0] = (EntityData){
-        17,                // Index (Sheep Bit Mask),
+        18,                // Index (Sheep Bit Mask),
         0,                 // Type (Byte),
         { (uint8_t)0x10 }, // Value
       };
@@ -819,10 +819,32 @@ uint8_t isReplaceableBlock (uint8_t block) {
   );
 }
 
+// Returns the amount of fluid levels in the block palette
+// Water has 8 levels (0-7), lava only has 4 (0, 2, 4, 6 in vanilla terms)
+uint8_t getFluidLevels (uint8_t fluid) {
+  return fluid == B_lava ? 4 : 8;
+}
+
+// Returns the fluid type (B_water or B_lava) of the given block, or 0
+uint8_t getFluidType (uint8_t block) {
+  if (block >= B_water && block < B_water + 8) return B_water;
+  if (block >= B_lava && block < B_lava + 4) return B_lava;
+  return 0;
+}
+
+// Checks whether the given block is water or lava of any level
+uint8_t isFluidBlock (uint8_t block) {
+  return getFluidType(block) != 0;
+}
+
+// Checks whether the given fluid can flow into the given block,
+// replacing it with a fluid block of the given level
 uint8_t isReplaceableFluid (uint8_t block, uint8_t level, uint8_t fluid) {
-  if (block >= fluid && block - fluid < 8) {
-    return block - fluid > level;
-  }
+  uint8_t block_fluid = getFluidType(block);
+  // Only replace the same fluid if it has traveled farther
+  if (block_fluid == fluid) return block - fluid > level;
+  // Different fluids are handled separately, see handleFluidMovement
+  if (block_fluid != 0) return false;
   return isReplaceableBlock(block);
 }
 
@@ -1040,79 +1062,110 @@ uint8_t handlePlayerEating (PlayerData *player, uint8_t just_check) {
   return true;
 }
 
+// Places fluid at the given coordinates, unless it mixes with the other
+// fluid type, in which case cobblestone is placed instead.
+// Returns true if fluid was placed and should continue flowing.
+static uint8_t placeFluid (short x, uint8_t y, short z, uint8_t fluid, uint8_t block) {
+  uint8_t target_fluid = getFluidType(getBlockAt(x, y, z));
+  if (target_fluid != 0 && target_fluid != fluid) {
+    makeBlockChange(x, y, z, B_cobblestone);
+    return false;
+  }
+  makeBlockChange(x, y, z, block);
+  return true;
+}
+
+// Checks whether flowing fluid at the given coordinates
+// can still trace its way back to a source block
+static uint8_t isFluidConnected (short x, uint8_t y, short z, uint8_t fluid, uint8_t block, uint8_t *adjacent) {
+  // Source blocks are always connected
+  if (block == fluid) return true;
+  // Fluid falling from above is connected
+  if (y < 255 && getFluidType(getBlockAt(x, y + 1, z)) == fluid) return true;
+  // Otherwise, require an adjacent block exactly one level lower
+  for (int i = 0; i < 4; i ++) {
+    if (adjacent[i] == block - 1) return true;
+  }
+  return false;
+}
+
 void handleFluidMovement (short x, uint8_t y, short z, uint8_t fluid, uint8_t block) {
 
-  // Get fluid level (0-7)
-  // The terminology here is a bit different from vanilla:
-  // a higher fluid "level" means the fluid has traveled farther
-  uint8_t level = block - fluid;
+  // Handle the fluid falling down a column iteratively,
+  // to avoid deep recursion on platforms with small stacks
+  while (true) {
 
-  // Query blocks adjacent to this fluid stream
-  uint8_t adjacent[4] = {
-    getBlockAt(x + 1, y, z),
-    getBlockAt(x - 1, y, z),
-    getBlockAt(x, y, z + 1),
-    getBlockAt(x, y, z - 1)
-  };
+    // Query blocks adjacent to this fluid stream
+    uint8_t adjacent[4] = {
+      getBlockAt(x + 1, y, z),
+      getBlockAt(x - 1, y, z),
+      getBlockAt(x, y, z + 1),
+      getBlockAt(x, y, z - 1)
+    };
 
-  // Handle maintaining connections to a fluid source
-  if (level != 0) {
-    // Check if this fluid is connected to a block exactly one level lower
-    uint8_t connected = false;
-    for (int i = 0; i < 4; i ++) {
-      if (adjacent[i] == block - 1) {
-        connected = true;
-        break;
-      }
-    }
-    // If not connected, clear this block and recalculate surrounding flow
-    if (!connected) {
+    // Handle maintaining connections to a fluid source
+    if (!isFluidConnected(x, y, z, fluid, block, adjacent)) {
+      // If not connected, clear this block and recalculate surrounding flow
       makeBlockChange(x, y, z, B_air);
       checkFluidUpdate(x + 1, y, z, adjacent[0]);
       checkFluidUpdate(x - 1, y, z, adjacent[1]);
       checkFluidUpdate(x, y, z + 1, adjacent[2]);
       checkFluidUpdate(x, y, z - 1, adjacent[3]);
+      if (y > 0) checkFluidUpdate(x, y - 1, z, getBlockAt(x, y - 1, z));
       return;
     }
+
+    // Check if the fluid should flow down, prioritize that over lateral flow
+    // Falling fluid is placed as flowing (level 1), never as a new source
+    if (y == 0) break;
+    uint8_t block_below = getBlockAt(x, y - 1, z);
+    uint8_t below_fluid = getFluidType(block_below);
+    if (below_fluid == fluid) {
+      // Don't fall into a pool, but refill shallower fluid below
+      if (block_below - fluid <= 1) break;
+    } else if (below_fluid == 0 && !isReplaceableBlock(block_below)) {
+      break;
+    }
+    if (!placeFluid(x, y - 1, z, fluid, fluid + 1)) return;
+    y --;
+    block = fluid + 1;
+
   }
 
-  // Check if water should flow down, prioritize that over lateral flow
-  uint8_t block_below = getBlockAt(x, y - 1, z);
-  if (isReplaceableBlock(block_below)) {
-    makeBlockChange(x, y - 1, z, fluid);
-    return handleFluidMovement(x, y - 1, z, fluid, fluid);
-  }
+  // Get fluid level
+  // The terminology here is a bit different from vanilla:
+  // a higher fluid "level" means the fluid has traveled farther
+  uint8_t level = block - fluid;
 
   // Stop flowing laterally at the maximum level
-  if (level == 3 && fluid == B_lava) return;
-  if (level == 7) return;
+  if (level >= getFluidLevels(fluid) - 1) return;
 
-  // Handle lateral water flow, increasing level by 1
-  if (isReplaceableFluid(adjacent[0], level, fluid)) {
-    makeBlockChange(x + 1, y, z, block + 1);
-    handleFluidMovement(x + 1, y, z, fluid, block + 1);
-  }
-  if (isReplaceableFluid(adjacent[1], level, fluid)) {
-    makeBlockChange(x - 1, y, z, block + 1);
-    handleFluidMovement(x - 1, y, z, fluid, block + 1);
-  }
-  if (isReplaceableFluid(adjacent[2], level, fluid)) {
-    makeBlockChange(x, y, z + 1, block + 1);
-    handleFluidMovement(x, y, z + 1, fluid, block + 1);
-  }
-  if (isReplaceableFluid(adjacent[3], level, fluid)) {
-    makeBlockChange(x, y, z - 1, block + 1);
-    handleFluidMovement(x, y, z - 1, fluid, block + 1);
+  // Flowing fluid sitting on top of the same fluid doesn't spread,
+  // source blocks always do
+  if (level != 0 && y > 0 && getFluidType(getBlockAt(x, y - 1, z)) == fluid) return;
+
+  // Handle lateral flow, increasing level by 1
+  static const short dx[4] = { 1, -1, 0, 0 };
+  static const short dz[4] = { 0, 0, 1, -1 };
+  for (int i = 0; i < 4; i ++) {
+    uint8_t target = getBlockAt(x + dx[i], y, z + dz[i]);
+    uint8_t target_fluid = getFluidType(target);
+    if (target_fluid != 0 && target_fluid != fluid) {
+      // Fluids of different types turn into cobblestone where they meet
+      makeBlockChange(x + dx[i], y, z + dz[i], B_cobblestone);
+      continue;
+    }
+    if (!isReplaceableFluid(target, level, fluid)) continue;
+    makeBlockChange(x + dx[i], y, z + dz[i], block + 1);
+    handleFluidMovement(x + dx[i], y, z + dz[i], fluid, block + 1);
   }
 
 }
 
 void checkFluidUpdate (short x, uint8_t y, short z, uint8_t block) {
 
-  uint8_t fluid;
-  if (block >= B_water && block < B_water + 8) fluid = B_water;
-  else if (block >= B_lava && block < B_lava + 4) fluid = B_lava;
-  else return;
+  uint8_t fluid = getFluidType(block);
+  if (fluid == 0) return;
 
   handleFluidMovement(x, y, z, fluid, block);
 
@@ -1125,12 +1178,12 @@ void playPickupAnimation (PlayerData *player, uint16_t item, double x, double y,
   // Spawn a new item entity at the input coordinates
   // ID -1 is safe, as elsewhere it's reserved as a placeholder
   // The player's name is used as the UUID as it's cheap and unique enough
-  sc_spawnEntity(player->client_fd, -1, (uint8_t *)player->name, 69, x + 0.5, y + 0.5, z + 0.5, 0, 0);
+  sc_spawnEntity(player->client_fd, -1, (uint8_t *)player->name, E_item, x + 0.5, y + 0.5, z + 0.5, 0, 0);
 
   // Write a Set Entity Metadata packet for the item
   // There's no packets.c entry for this, as it's not cheaply generalizable
   writeVarInt(player->client_fd, 12 + sizeVarInt(item));
-  writeByte(player->client_fd, 0x5C);
+  writeByte(player->client_fd, 0x65);
   writeVarInt(player->client_fd, -1);
 
   // Describe slot data array entry
@@ -1156,7 +1209,7 @@ void playPickupAnimation (PlayerData *player, uint16_t item, double x, double y,
 void handlePlayerAction (PlayerData *player, int action, short x, short y, short z) {
 
   // Re-sync slot when player drops an item
-  if (action == 3 || action == 4) {
+  if (action == 4 || action == 5) {
     sc_setContainerSlot(
       player->client_fd, 0,
       serverSlotToClientSlot(0, player->hotbar),
@@ -1167,14 +1220,15 @@ void handlePlayerAction (PlayerData *player, int action, short x, short y, short
   }
 
   // "Finish eating" action, called any time eating stops
-  if (action == 5) {
+  if (action == 6) {
     // Reset eating timer and clear eating flag
     player->flagval_16 = 0;
     player->flags &= ~0x10;
   }
 
   // Ignore further actions not pertaining to mining blocks
-  if (action != 0 && action != 2) return;
+  // 0 is "start mining", 3 is "finish mining"
+  if (action != 0 && action != 3) return;
 
   // In creative, only the "start mining" action is sent
   // No additional verification is performed, the block is simply removed
@@ -1386,6 +1440,15 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
 
 }
 
+// Returns the amount of currently allocated mobs
+int countMobs () {
+  int count = 0;
+  for (int i = 0; i < MAX_MOBS; i ++) {
+    if (mob_data[i].type != 0) count ++;
+  }
+  return count;
+}
+
 void spawnMob (uint8_t type, short x, uint8_t y, short z, uint8_t health) {
 
   for (int i = 0; i < MAX_MOBS; i ++) {
@@ -1427,6 +1490,50 @@ void spawnMob (uint8_t type, short x, uint8_t y, short z, uint8_t health) {
 
 }
 
+// Attempts to spawn a mob naturally in the given block column.
+// Scans upward from start_y for the first space that fits a mob.
+// Passive mobs spawn on grass during the day, hostile mobs spawn
+// at night or underground. Returns true if a mob was spawned.
+uint8_t trySpawnNaturalMob (short x, short z, uint8_t start_y, uint32_t r) {
+
+  // Keep the scan inside of the world, y - 1 must not underflow
+  uint8_t y = start_y < 1 ? 1 : start_y;
+
+  uint8_t b_low = getBlockAt(x, y - 1, z);
+  uint8_t b_mid = getBlockAt(x, y, z);
+  uint8_t b_top = getBlockAt(x, y + 1, z);
+  while (y < 254) {
+    if ( // Solid block below, non-solid (spawnable) at feet and above
+      !isPassableBlock(b_low) &&
+      isPassableSpawnBlock(b_mid) &&
+      isPassableSpawnBlock(b_top)
+    ) break;
+    b_low = b_mid;
+    b_mid = b_top;
+    b_top = getBlockAt(x, y + 2, z);
+    y ++;
+  }
+  if (y >= 254) return false;
+
+  uint8_t daytime = world_time < 13000 || world_time > 23460;
+
+  if (daytime && y > 48) {
+    // Passive mobs only spawn on grass, like in vanilla
+    if (b_low != B_grass_block && b_low != B_snowy_grass_block) return false;
+    uint32_t mob_choice = (r >> 12) & 3;
+    if (mob_choice == 0) spawnMob(E_chicken, x, y, z, 4);
+    else if (mob_choice == 1) spawnMob(E_cow, x, y, z, 10);
+    else if (mob_choice == 2) spawnMob(E_pig, x, y, z, 10);
+    else spawnMob(E_sheep, x, y, z, 8);
+  } else {
+    // Hostile mobs spawn at night, or underground at any time
+    spawnMob(E_zombie, x, y, z, 20);
+  }
+
+  return true;
+
+}
+
 void interactEntity (int entity_id, int interactor_id) {
 
   PlayerData *player;
@@ -1437,7 +1544,7 @@ void interactEntity (int entity_id, int interactor_id) {
   MobData *mob = &mob_data[mob_index];
 
   switch (mob->type) {
-    case 106: // Sheep
+    case E_sheep:
       if (player->inventory_items[player->hotbar] != I_shears)
         return;
 
@@ -1462,7 +1569,7 @@ void interactEntity (int entity_id, int interactor_id) {
         if (client_fd == -1) continue;
         if (player->flags & 0x20) continue;
 
-        sc_entityAnimation(client_fd, interactor_id, 0);
+        sc_swingAnimation(client_fd, interactor_id);
       }
 
       broadcastMobMetadata(-1, entity_id);
@@ -1589,11 +1696,11 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
         PlayerData *player;
         if (getPlayerData(attacker_id, &player)) return;
         switch (mob->type) {
-          case 25: givePlayerItem(player, I_chicken, 1); break;
-          case 28: givePlayerItem(player, I_beef, 1 + (fast_rand() % 3)); break;
-          case 95: givePlayerItem(player, I_porkchop, 1 + (fast_rand() % 3)); break;
-          case 106: givePlayerItem(player, I_mutton, 1 + (fast_rand() & 1)); break;
-          case 145: givePlayerItem(player, I_rotten_flesh, (fast_rand() % 3)); break;
+          case E_chicken: givePlayerItem(player, I_chicken, 1); break;
+          case E_cow: givePlayerItem(player, I_beef, 1 + (fast_rand() % 3)); break;
+          case E_pig: givePlayerItem(player, I_porkchop, 1 + (fast_rand() % 3)); break;
+          case E_sheep: givePlayerItem(player, I_mutton, 1 + (fast_rand() & 1)); break;
+          case E_zombie: givePlayerItem(player, I_rotten_flesh, (fast_rand() % 3)); break;
           default: break;
         }
       }
@@ -1663,6 +1770,22 @@ void handleServerTick (int64_t time_since_last_tick) {
     // Send Keep Alive and Update Time packets
     sc_keepAlive(player->client_fd);
     sc_updateTime(player->client_fd, world_time);
+    // Periodically try to spawn mobs around the player, so that mobs
+    // also appear when the player isn't exploring new chunks
+    uint32_t r = fast_rand();
+    if ((r & 7) == 0 && countMobs() < MAX_MOBS / 2) {
+      // Pick a random column 16 to 31 blocks away from the player
+      short distance = 16 + ((r >> 3) & 15);
+      short spawn_x = player->x, spawn_z = player->z;
+      switch ((r >> 7) & 3) {
+        case 0: spawn_x += distance; spawn_z += ((r >> 16) & 31) - 16; break;
+        case 1: spawn_x -= distance; spawn_z += ((r >> 16) & 31) - 16; break;
+        case 2: spawn_z += distance; spawn_x += ((r >> 16) & 31) - 16; break;
+        default: spawn_z -= distance; spawn_x += ((r >> 16) & 31) - 16; break;
+      }
+      // Start below the player's feet to also find nearby lower ground
+      trySpawnNaturalMob(spawn_x, spawn_z, player->y > 8 ? player->y - 8 : 1, r);
+    }
     // Tick damage from lava
     uint8_t block = getBlockAt(player->x, player->y, player->z);
     if (block >= B_lava && block < B_lava + 4) {
@@ -1725,10 +1848,10 @@ void handleServerTick (int64_t time_since_last_tick) {
     }
 
     uint8_t passive = (
-      mob_data[i].type == 25 || // Chicken
-      mob_data[i].type == 28 || // Cow
-      mob_data[i].type == 95 || // Pig
-      mob_data[i].type == 106 // Sheep
+      mob_data[i].type == E_chicken ||
+      mob_data[i].type == E_cow ||
+      mob_data[i].type == E_pig ||
+      mob_data[i].type == E_sheep
     );
     // Mob "panic" timer, set to 3 after being hit
     // Currently has no effect on hostile mobs
@@ -1953,7 +2076,7 @@ ssize_t writeEntityData (int client_fd, EntityData *data) {
   switch (data->type) {
     case 0: // Byte
       return writeByte(client_fd, data->value.byte);
-    case 21: // Pose
+    case 20: // Pose
       writeVarInt(client_fd, data->value.pose);
       return 0;
 
@@ -1969,7 +2092,7 @@ int sizeEntityData (EntityData *data) {
     case 0: // Byte
       value_size = 1;
       break;
-    case 21: // Pose
+    case 20: // Pose
       value_size = sizeVarInt(data->value.pose);
       break;
 

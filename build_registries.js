@@ -33,7 +33,16 @@ const blockBlacklist = [
   "infested_",
   "stained_",
   "_terracotta",
-  "_head"
+  "_head",
+  "poplar",
+  "wool_stairs",
+  "wool_slab",
+  "straw_bed",
+  "golden_dandelion",
+  "copper_bars",
+  "copper_chain",
+  "copper_torch",
+  "_shelf"
 ];
 
 // Whitelisted blocks, i.e. guaranteed to be included
@@ -63,7 +72,24 @@ const blockWhitelist = [
   "copper_block"
 ];
 
+// Entity types referenced by the server, exported as E_ constants
+const entityTypes = [
+  "chicken",
+  "cow",
+  "pig",
+  "sheep",
+  "zombie",
+  "item",
+  "player"
+];
+
 // Currently, only 4 biome types are supported, excluding "beach"
+// Timelines sent to the client, tagged as #in_overworld
+const timelines = [
+  "day",
+  "moon"
+];
+
 const biomes = [
   "plains",
   "mangrove_swamp",
@@ -84,6 +110,8 @@ async function extractItemsAndBlocks () {
   const itemSource = registriesJSON["minecraft:item"].entries;
   // Retrieve the registry list for blocks too, used later in tags
   const blockRegistrySource = registriesJSON["minecraft:block"].entries;
+  // Entity type IDs
+  const entityRegistrySource = registriesJSON["minecraft:entity_type"].entries;
 
   // Sort blocks by their network ID
   // Since we're only storing 256 blocks, this prioritizes the "common" ones first
@@ -119,7 +147,7 @@ async function extractItemsAndBlocks () {
       blocks["snowy_" + entry[0].replace("minecraft:", "")] = snowyState.id;
     }
     // Include levels for fluids
-    if ("fluid" in entry[1].definition) {
+    if (entry[0] === "minecraft:water" || entry[0] === "minecraft:lava") {
       for (let i = 1; i <= 7; i ++) {
         blocks[entry[0].replace("minecraft:", "") + "_" + i] = defaultState.id + i;
       }
@@ -166,7 +194,12 @@ async function extractItemsAndBlocks () {
     blockRegistry[block.replace("minecraft:", "")] = blockRegistrySource[block].protocol_id;
   }
 
-  return { blocks, items, palette, mapping, mappingWithOverrides, blockRegistry };
+  const entities = {};
+  for (const entity of entityTypes) {
+    entities[entity] = entityRegistrySource["minecraft:" + entity].protocol_id;
+  }
+
+  return { blocks, items, palette, mapping, mappingWithOverrides, blockRegistry, entities };
 
 }
 
@@ -245,7 +278,7 @@ function serializeTags (tags) {
   const parts = [];
 
   // Packet ID for Update Tags
-  parts.push(Buffer.from([0x0D]));
+  parts.push(Buffer.from([0x0E]));
 
   // Tag type count
   parts.push(writeVarInt(Object.keys(tags).length));
@@ -305,14 +338,43 @@ function toCArray (buffer) {
 
 const requiredRegistries = [
   "cat_variant",
+  "cat_sound_variant",
   "chicken_variant",
+  "chicken_sound_variant",
   "cow_variant",
+  "cow_sound_variant",
   "frog_variant",
   "painting_variant",
   "pig_variant",
+  "pig_sound_variant",
   "wolf_sound_variant",
   "wolf_variant",
-  "damage_type"
+  "zombie_nautilus_variant",
+  "damage_type",
+  "trim_material",
+  "block_transformer",
+  "jukebox_song",
+  "instrument",
+  "decorated_pot_pattern"
+];
+
+// Registries for which every entry is sent, as the client looks
+// these up by name (e.g. chicken variants are picked per biome,
+// item components refer to trim materials, songs, instruments, etc.)
+const fullRegistries = [
+  "chicken_variant",
+  "damage_type",
+  "trim_material",
+  "block_transformer",
+  "jukebox_song",
+  "instrument",
+  "decorated_pot_pattern"
+];
+
+// Preferred entry for registries where only one entry is sent
+const preferredVariants = [
+  "temperate",
+  "classic"
 ];
 
 async function convert () {
@@ -329,11 +391,12 @@ async function convert () {
       console.error(`Missing required registry "${registry}"!`);
       return;
     }
-    if (registry.endsWith("variant")) {
+    if (!fullRegistries.includes(registry)) {
       // The mob "variants" only require one valid variant to be accepted
-      // Send "temperate" if available, otherwise shortest string to save memory
-      if (registries[registry].includes("temperate")) {
-        registryBuffers.push(serializeRegistry(registry, ["temperate"]));
+      // Send a default variant if available, otherwise shortest string to save memory
+      const preferred = preferredVariants.find(c => registries[registry].includes(c));
+      if (preferred) {
+        registryBuffers.push(serializeRegistry(registry, [preferred]));
       } else {
         const shortest = registries[registry].sort((a, b) => a.length - b.length)[0];
         registryBuffers.push(serializeRegistry(registry, [shortest]));
@@ -342,6 +405,12 @@ async function convert () {
       registryBuffers.push(serializeRegistry(registry, registries[registry]));
     }
   }
+  // The overworld dimension type references the "overworld" clock,
+  // which drives the day/night cycle via the timelines below.
+  // Clock ID 0 is used in the Update Time packet.
+  registryBuffers.push(serializeRegistry("world_clock", ["overworld"]));
+  // Timelines for the sky/sun ("day") and moon phases ("moon")
+  registryBuffers.push(serializeRegistry("timeline", timelines));
   // Send biomes separately - only "plains" is actually required
   registryBuffers.push(serializeRegistry("worldgen/biome", biomes));
   // Send dimensions separately - we only use "overworld"
@@ -397,13 +466,39 @@ async function convert () {
       ],
       "leaves": [
         itemsAndBlocks.blockRegistry["oak_leaves"]
-      ]
+      ],
+      // Referenced by the overworld dimension type. Since block tags are
+      // sent, the client resolves it against these and requires it to exist.
+      "infiniburn_overworld": []
     },
     "item": {
       "planks": [
         itemsAndBlocks.items["oak_planks"]
       ]
-    }
+    },
+    "timeline": {
+      // Referenced by the overworld dimension type, IDs match send order
+      "in_overworld": timelines.map((c, i) => i)
+    },
+    // The tags below are referenced by item components, which the client
+    // builds when joining. They must exist, but can be left empty.
+    "damage_type": {
+      "is_fire": [],
+      "is_explosion": [],
+      "bypasses_shield": []
+    },
+    "banner_pattern": Object.fromEntries([
+      "flower",
+      "creeper",
+      "skull",
+      "mojang",
+      "globe",
+      "piglin",
+      "flow",
+      "guster",
+      "field_masoned",
+      "bordure_indented"
+    ].map(c => ["pattern_item/" + c, []]))
   });
 
   const networkBlockPalette = toVarIntBuffer(Object.values(itemsAndBlocks.palette));
@@ -413,11 +508,11 @@ async function convert () {
 #include "registries.h"
 
 // Binary contents of required "Registry Data" packets
-uint8_t registries_bin[] = {
+const uint8_t registries_bin[] = {
 ${toCArray(fullRegistryBuffer)}
 };
 // Binary contents of "Update Tags" packets
-uint8_t tags_bin[] = {
+const uint8_t tags_bin[] = {
 ${toCArray(tagBuffer)}
 };
 
@@ -447,8 +542,8 @@ uint8_t I_to_B (uint16_t item) {
 #include <stdint.h>
 
 // Binary packet data (${fullRegistryBuffer.length + tagBuffer.length} bytes total)
-extern uint8_t registries_bin[${fullRegistryBuffer.length}];
-extern uint8_t tags_bin[${tagBuffer.length}];
+extern const uint8_t registries_bin[${fullRegistryBuffer.length}];
+extern const uint8_t tags_bin[${tagBuffer.length}];
 
 extern uint16_t block_palette[256]; // Block palette
 extern uint8_t network_block_palette[${networkBlockPalette.length}]; // Block palette as VarInt buffer
@@ -460,6 +555,12 @@ ${Object.keys(itemsAndBlocks.palette).map((c, i) => `#define B_${c} ${i}`).join(
 
 // Item identifiers
 ${Object.entries(itemsAndBlocks.items).map(c => `#define I_${c[0]} ${c[1]}`).join("\n")}
+
+// Bedrock block state, used to fill the bottom chunk sections
+#define BEDROCK_STATE_ID ${itemsAndBlocks.blocks["bedrock"]}
+
+// Entity type identifiers
+${Object.entries(itemsAndBlocks.entities).map(c => `#define E_${c[0]} ${c[1]}`).join("\n")}
 
 // Biome identifiers
 ${biomes.map((c, i) => `#define W_${c} ${i}`).join("\n")}

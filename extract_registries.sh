@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REQUIRED_MAJOR=21
+REQUIRED_MAJOR=25
 SERVER_JAR="${SERVER_JAR:-server.jar}"
 NOTCHIAN_DIR="notchian"
 JS_RUNTIME=""
@@ -36,7 +36,7 @@ prepare_notchian_dir() {
 dump_registries() {
   if [[ ! -f "$SERVER_JAR" ]]; then
     echo "No server.jar found (looked for $SERVER_JAR)."
-	echo "Please download the 1.21.8 server.jar (e.g. from https://mcversions.net/download/1.21.8)"
+	echo "Please download the 26.3 server.jar (e.g. from https://mcversions.net/download/26.3)"
 	echo "and place it in the \"notchian\" directory."
     exit 1
   fi

@@ -3,8 +3,8 @@ Minimalist Minecraft server for memory-restrictive embedded systems.
 
 The goal of this project is to enable hosting Minecraft servers on very weak devices, such as the ESP32. The project's priorities are, in order: **memory usage**, **performance**, and **features**. Because of this, compliance with vanilla Minecraft is not guaranteed, nor is it a goal of the project.
 
-- Minecraft version: `1.21.8`
-- Protocol version: `772`
+- Minecraft version: `26.3`
+- Protocol version: `777`
 
 > [!WARNING]
 > Currently, only the vanilla client is officially supported. Issues have been reported when using Fabric or similar.

@@ -108,6 +108,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         recv_count = 0;
         return;
       }
+      if (state == STATE_PLAY) cs_attack(client_fd);
       break;
 
     case 0x02:
@@ -170,40 +171,40 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       }
       break;
 
-    case 0x08:
+    case 0x09:
       if (state == STATE_PLAY) cs_chat(client_fd);
       break;
 
-    case 0x0B:
+    case 0x0C:
       if (state == STATE_PLAY) cs_clientStatus(client_fd);
       break;
 
-    case 0x0C: // Client tick (ignored)
-      break;
-
-    case 0x11:
-      if (state == STATE_PLAY) cs_clickContainer(client_fd);
+    case 0x0D: // Client tick (ignored)
       break;
 
     case 0x12:
+      if (state == STATE_PLAY) cs_clickContainer(client_fd);
+      break;
+
+    case 0x13:
       if (state == STATE_PLAY) cs_closeContainer(client_fd);
       break;
 
-    case 0x1B:
+    case 0x1C:
       if (state == STATE_PLAY) {
         // Serverbound keep-alive (ignored)
         discard_all(client_fd, length, false);
       }
       break;
 
-    case 0x19:
+    case 0x1A:
       if (state == STATE_PLAY) cs_interact(client_fd);
       break;
 
-    case 0x1D:
     case 0x1E:
     case 0x1F:
     case 0x20:
+    case 0x21:
       if (state == STATE_PLAY) {
 
         double x, y, z;
@@ -211,9 +212,9 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         uint8_t on_ground;
 
         // Read player position (and rotation)
-        if (packet_id == 0x1D) cs_setPlayerPosition(client_fd, &x, &y, &z, &on_ground);
-        else if (packet_id == 0x1F) cs_setPlayerRotation (client_fd, &yaw, &pitch, &on_ground);
-        else if (packet_id == 0x20) cs_setPlayerMovementFlags (client_fd, &on_ground);
+        if (packet_id == 0x1E) cs_setPlayerPosition(client_fd, &x, &y, &z, &on_ground);
+        else if (packet_id == 0x20) cs_setPlayerRotation (client_fd, &yaw, &pitch, &on_ground);
+        else if (packet_id == 0x21) cs_setPlayerMovementFlags (client_fd, &on_ground);
         else cs_setPlayerPositionAndRotation(client_fd, &x, &y, &z, &yaw, &pitch, &on_ground);
 
         PlayerData *player;
@@ -234,10 +235,10 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         }
 
         // Don't continue if all we got were flags
-        if (packet_id == 0x20) break;
+        if (packet_id == 0x21) break;
 
         // Update rotation in player data (if applicable)
-        if (packet_id != 0x1D) {
+        if (packet_id != 0x1E) {
           player->yaw = ((short)(yaw + 540) % 360 - 180) * 127 / 180;
           player->pitch = pitch / 90.0f * 127.0f;
         }
@@ -269,7 +270,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
 
         if (should_broadcast) {
           // If the packet had no rotation data, calculate it from player data
-          if (packet_id == 0x1D) {
+          if (packet_id == 0x1E) {
             yaw = player->yaw * 180 / 127;
             pitch = player->pitch * 90 / 127;
           }
@@ -278,7 +279,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
             if (player_data[i].client_fd == -1) continue;
             if (player_data[i].flags & 0x20) continue;
             if (player_data[i].client_fd == client_fd) continue;
-            if (packet_id == 0x1F) {
+            if (packet_id == 0x20) {
               sc_updateEntityRotation(player_data[i].client_fd, client_fd, player->yaw, player->pitch);
             } else {
               sc_teleportEntity(player_data[i].client_fd, client_fd, x, y, z, yaw, pitch);
@@ -288,7 +289,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         }
 
         // Don't continue if all we got was rotation data
-        if (packet_id == 0x1F) break;
+        if (packet_id == 0x20) break;
 
         // Players send movement packets roughly 20 times per second when
         // moving, and much less frequently when standing still. We can
@@ -357,36 +358,9 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           // at a random position within the chunk
           short mob_x = (_x + dx * VIEW_DISTANCE) * 16 + ((r >> 4) & 15);
           short mob_z = (_z + dz * VIEW_DISTANCE) * 16 + ((r >> 8) & 15);
-          // Start at the Y coordinate of the spawning player and move upward
+          // Start 8 blocks below the spawning player and move upward
           // until a valid space is found
-          uint8_t mob_y = cy - 8;
-          uint8_t b_low = getBlockAt(mob_x, mob_y - 1, mob_z);
-          uint8_t b_mid = getBlockAt(mob_x, mob_y, mob_z);
-          uint8_t b_top = getBlockAt(mob_x, mob_y + 1, mob_z);
-          while (mob_y < 255) {
-            if ( // Solid block below, non-solid(spawnable) at feet and above
-              !isPassableBlock(b_low) &&
-              isPassableSpawnBlock(b_mid) &&
-              isPassableSpawnBlock(b_top)
-            ) break;
-            b_low = b_mid;
-            b_mid = b_top;
-            b_top = getBlockAt(mob_x, mob_y + 2, mob_z);
-            mob_y ++;
-          }
-          if (mob_y != 255) {
-            // Spawn passive mobs above ground during the day,
-            // or hostiles underground and during the night
-            if ((world_time < 13000 || world_time > 23460) && mob_y > 48) {
-              uint32_t mob_choice = (r >> 12) & 3;
-              if (mob_choice == 0) spawnMob(25, mob_x, mob_y, mob_z, 4); // Chicken
-              else if (mob_choice == 1) spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow
-              else if (mob_choice == 2) spawnMob(95, mob_x, mob_y, mob_z, 10); // Pig
-              else if (mob_choice == 3) spawnMob(106, mob_x, mob_y, mob_z, 8); // Sheep
-            } else {
-              spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie
-            }
-          }
+          trySpawnNaturalMob(mob_x, mob_z, cy > 8 ? cy - 8 : 1, r);
         }
 
         int count = 0;
@@ -428,35 +402,35 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       }
       break;
 
-    case 0x29:
+    case 0x2A:
       if (state == STATE_PLAY) cs_playerCommand(client_fd);
       break;
 
-    case 0x2A:
+    case 0x2B:
       if (state == STATE_PLAY) cs_playerInput(client_fd);
       break;
 
-    case 0x2B:
+    case 0x2C:
       if (state == STATE_PLAY) cs_playerLoaded(client_fd);
       break;
 
-    case 0x34:
+    case 0x36:
       if (state == STATE_PLAY) cs_setHeldItem(client_fd);
       break;
 	
-    case 0x3C:
-      if (state == STATE_PLAY) cs_swingArm(client_fd);
+    case 0x2E:
+      if (state == STATE_PLAY) cs_punch(client_fd);
       break;
 
-    case 0x28:
+    case 0x29:
       if (state == STATE_PLAY) cs_playerAction(client_fd);
       break;
 
-    case 0x3F:
+    case 0x42:
       if (state == STATE_PLAY) cs_useItemOn(client_fd);
       break;
 
-    case 0x40:
+    case 0x43:
       if (state == STATE_PLAY) cs_useItem(client_fd);
       break;
 

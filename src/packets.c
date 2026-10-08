@@ -28,7 +28,7 @@
 int sc_statusResponse (int client_fd) {
 
   char header[] = "{"
-    "\"version\":{\"name\":\"1.21.8\",\"protocol\":772},"
+    "\"version\":{\"name\":\"26.3\",\"protocol\":777},"
     "\"description\":{\"text\":\"";
   char footer[] = "\"}}";
 
@@ -86,12 +86,14 @@ int sc_loginSuccess (int client_fd, uint8_t *uuid, char *name) {
   printf("Sending Login Success...\n\n");
 
   uint8_t name_length = strlen(name);
-  writeVarInt(client_fd, 1 + 16 + sizeVarInt(name_length) + name_length + 1);
+  writeVarInt(client_fd, 1 + 16 + sizeVarInt(name_length) + name_length + 1 + 16);
   writeVarInt(client_fd, 0x02);
   send_all(client_fd, uuid, 16);
   writeVarInt(client_fd, name_length);
   send_all(client_fd, name, name_length);
   writeVarInt(client_fd, 0);
+  // Session ID, reuse the player UUID
+  send_all(client_fd, uuid, 16);
 
   return 0;
 }
@@ -137,13 +139,12 @@ int cs_clientInformation (int client_fd) {
 int sc_knownPacks (int client_fd) {
   printf("Sending Server's Known Packs\n\n");
   char known_packs[] = {
-    0x0e, 0x01, 0x09, 0x6d, 0x69, 0x6e,
+    0x0f, 0x01, 0x09, 0x6d, 0x69, 0x6e,
     0x65, 0x63, 0x72, 0x61, 0x66, 0x74, 0x04, 0x63,
-    0x6f, 0x72, 0x65, 0x06, 0x31, 0x2e, 0x32, 0x31,
-    0x2e, 0x38
+    0x6f, 0x72, 0x65, 0x04, 0x32, 0x36, 0x2e, 0x33
   };
-  writeVarInt(client_fd, 24);
-  send_all(client_fd, &known_packs, 24);
+  writeVarInt(client_fd, 22);
+  send_all(client_fd, &known_packs, 22);
   return 0;
 }
 
@@ -189,8 +190,8 @@ int sc_finishConfiguration (int client_fd) {
 // S->C Login (play)
 int sc_loginPlay (int client_fd) {
 
-  writeVarInt(client_fd, 47 + sizeVarInt(MAX_PLAYERS) + sizeVarInt(VIEW_DISTANCE) * 2);
-  writeByte(client_fd, 0x2B);
+  writeVarInt(client_fd, 48 + sizeVarInt(MAX_PLAYERS) + sizeVarInt(VIEW_DISTANCE) * 2);
+  writeByte(client_fd, 0x32);
   // entity id
   writeUint32(client_fd, client_fd);
   // hardcore
@@ -222,8 +223,8 @@ int sc_loginPlay (int client_fd) {
   writeUint64(client_fd, 0x0123456789ABCDEF);
   // gamemode
   writeByte(client_fd, GAMEMODE);
-  // previous gamemode
-  writeByte(client_fd, 0xFF);
+  // previous gamemode (0 means none)
+  writeByte(client_fd, 0);
   // is debug
   writeByte(client_fd, 0);
   // is flat
@@ -234,6 +235,8 @@ int sc_loginPlay (int client_fd) {
   writeVarInt(client_fd, 0);
   // sea level
   writeVarInt(client_fd, 63);
+  // online mode
+  writeByte(client_fd, 0);
   // secure chat
   writeByte(client_fd, 0);
 
@@ -245,7 +248,7 @@ int sc_loginPlay (int client_fd) {
 int sc_synchronizePlayerPosition (int client_fd, double x, double y, double z, float yaw, float pitch) {
 
   writeVarInt(client_fd, 61 + sizeVarInt(-1));
-  writeByte(client_fd, 0x41);
+  writeByte(client_fd, 0x49);
 
   // Teleport ID
   writeVarInt(client_fd, -1);
@@ -274,10 +277,17 @@ int sc_synchronizePlayerPosition (int client_fd, double x, double y, double z, f
 // S->C Set Default Spawn Position
 int sc_setDefaultSpawnPosition (int client_fd, int64_t x, int64_t y, int64_t z) {
 
-  writeVarInt(client_fd, sizeVarInt(0x5A) + 12);
-  writeVarInt(client_fd, 0x5A);
+  const char *dimension = "overworld";
+  writeVarInt(client_fd, sizeVarInt(0x63) + 1 + 9 + 16);
+  writeVarInt(client_fd, 0x63);
 
+  // Dimension name
+  writeVarInt(client_fd, 9);
+  send_all(client_fd, dimension, 9);
+  // Location
   writeUint64(client_fd, ((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF));
+  // Yaw and pitch
+  writeFloat(client_fd, 0);
   writeFloat(client_fd, 0);
 
   return 0;
@@ -287,7 +297,7 @@ int sc_setDefaultSpawnPosition (int client_fd, int64_t x, int64_t y, int64_t z) 
 int sc_playerAbilities (int client_fd, uint8_t flags) {
 
   writeVarInt(client_fd, 10);
-  writeByte(client_fd, 0x39);
+  writeByte(client_fd, 0x41);
 
   writeByte(client_fd, flags);
   writeFloat(client_fd, 0.05f);
@@ -299,13 +309,21 @@ int sc_playerAbilities (int client_fd, uint8_t flags) {
 // S->C Update Time
 int sc_updateTime (int client_fd, uint64_t ticks) {
 
-  writeVarInt(client_fd, 18);
-  writeVarInt(client_fd, 0x6A);
+  writeVarInt(client_fd, 19 + sizeVarLong(ticks));
+  writeVarInt(client_fd, 0x73);
 
   uint64_t world_age = get_program_time() / 50000;
   writeUint64(client_fd, world_age);
-  writeUint64(client_fd, ticks);
-  writeByte(client_fd, true);
+
+  // Clock updates, only the overworld clock (ID 0) is sent
+  writeByte(client_fd, 1);
+  writeVarInt(client_fd, 0);
+  // Total ticks
+  writeVarLong(client_fd, ticks);
+  // Partial tick
+  writeFloat(client_fd, 0);
+  // Rate
+  writeFloat(client_fd, 1.0f);
 
   return 0;
 }
@@ -313,7 +331,7 @@ int sc_updateTime (int client_fd, uint64_t ticks) {
 // S->C Game Event 13 (Start waiting for level chunks)
 int sc_startWaitingForChunks (int client_fd) {
   writeVarInt(client_fd, 6);
-  writeByte(client_fd, 0x22);
+  writeByte(client_fd, 0x27);
   writeByte(client_fd, 13);
   writeUint32(client_fd, 0);
   return 0;
@@ -322,7 +340,7 @@ int sc_startWaitingForChunks (int client_fd) {
 // S->C Set Center Chunk
 int sc_setCenterChunk (int client_fd, int x, int y) {
   writeVarInt(client_fd, 1 + sizeVarInt(x) + sizeVarInt(y));
-  writeByte(client_fd, 0x57);
+  writeByte(client_fd, 0x60);
   writeVarInt(client_fd, x);
   writeVarInt(client_fd, y);
   return 0;
@@ -331,11 +349,14 @@ int sc_setCenterChunk (int client_fd, int x, int y) {
 // S->C Chunk Data and Update Light
 int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
 
-  const int chunk_data_size = (4101 + sizeVarInt(256) + sizeof(network_block_palette)) * 20 + 6 * 12;
-  const int light_data_size = 14 + (sizeVarInt(2048) + 2048) * 26;
+  const int chunk_data_size = (
+    (4103 + sizeVarInt(256) + sizeof(network_block_palette)) * 20 +
+    (7 + sizeVarInt(BEDROCK_STATE_ID)) * 4
+  );
+  const int light_data_size = 10 + (sizeVarInt(2048) + 2048) * 26;
 
   writeVarInt(client_fd, 11 + sizeVarInt(chunk_data_size) + chunk_data_size + light_data_size);
-  writeByte(client_fd, 0x27);
+  writeByte(client_fd, 0x2E);
 
   writeUint32(client_fd, _x);
   writeUint32(client_fd, _z);
@@ -349,8 +370,9 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   // send 4 chunk sections (up to Y=0) with no blocks
   for (int i = 0; i < 4; i ++) {
     writeUint16(client_fd, 4096); // block count
+    writeUint16(client_fd, 0); // fluid count
     writeByte(client_fd, 0); // block bits
-    writeVarInt(client_fd, 85); // block palette (bedrock)
+    writeVarInt(client_fd, BEDROCK_STATE_ID); // block palette (bedrock)
     writeByte(client_fd, 0); // biome bits
     writeByte(client_fd, 0); // biome palette
   }
@@ -360,13 +382,19 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   // send chunk sections
   for (int i = 0; i < 20; i ++) {
     y = i * 16;
+    uint8_t biome = buildChunkSection(x, y, z);
+    // count fluid blocks, the client skips fluid rendering if this is 0
+    uint16_t fluid_count = 0;
+    for (int j = 0; j < 4096; j ++) {
+      if (isFluidBlock(chunk_section[j])) fluid_count ++;
+    }
     writeUint16(client_fd, 4096); // block count
+    writeUint16(client_fd, fluid_count); // fluid count
     writeByte(client_fd, 8); // bits per entry
     writeVarInt(client_fd, 256); // block palette length
     // block palette as varint buffer
     send_all(client_fd, network_block_palette, sizeof(network_block_palette));
     // chunk section buffer
-    uint8_t biome = buildChunkSection(x, y, z);
     send_all(client_fd, chunk_section, 4096);
     // biome data
     writeByte(client_fd, 0); // bits per entry
@@ -375,22 +403,12 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
     task_yield();
   }
 
-  // send 8 chunk sections (up to Y=192) with no blocks
-  for (int i = 0; i < 8; i ++) {
-    writeUint16(client_fd, 4096); // block count
-    writeByte(client_fd, 0); // block bits
-    writeVarInt(client_fd, 0); // block palette (air)
-    writeByte(client_fd, 0); // biome bits
-    writeByte(client_fd, 0); // biome palette
-  }
-  // yield to idle task
-  task_yield();
-
   writeVarInt(client_fd, 0); // omit block entities
 
   // light data
-  writeVarInt(client_fd, 1);
-  writeUint64(client_fd, 0b11111111111111111111111111);
+  // Bit sets are sent as little-endian byte arrays, sky light mask has 26 bits set
+  writeVarInt(client_fd, 4);
+  writeUint32(client_fd, 0xFFFFFF03);
   writeVarInt(client_fd, 0);
   writeVarInt(client_fd, 0);
   writeVarInt(client_fd, 0);
@@ -433,7 +451,7 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
 int sc_keepAlive (int client_fd) {
 
   writeVarInt(client_fd, 9);
-  writeByte(client_fd, 0x26);
+  writeByte(client_fd, 0x2D);
 
   writeUint64(client_fd, 0);
 
@@ -512,7 +530,7 @@ int cs_playerAction (int client_fd) {
 int sc_openScreen (int client_fd, uint8_t window, const char *title, uint16_t length) {
 
   writeVarInt(client_fd, 1 + 2 * sizeVarInt(window) + 1 + 2 + length);
-  writeByte(client_fd, 0x34);
+  writeByte(client_fd, 0x3C);
 
   writeVarInt(client_fd, window);
   writeVarInt(client_fd, window);
@@ -574,6 +592,25 @@ int cs_useItemOn (int client_fd) {
 }
 
 // C->S Click Container
+// Reads and discards the component lists of a hashed item stack
+static int skipHashedComponents (int client_fd) {
+  // Added components: component type and CRC32C hash
+  int count = readVarInt(client_fd);
+  if (count == VARNUM_ERROR) return 1;
+  for (int i = 0; i < count; i ++) {
+    readVarInt(client_fd);
+    readUint32(client_fd);
+    if (recv_count == -1) return 1;
+  }
+  // Removed components: component type only
+  count = readVarInt(client_fd);
+  if (count == VARNUM_ERROR) return 1;
+  for (int i = 0; i < count; i ++) {
+    if (readVarInt(client_fd) == VARNUM_ERROR) return 1;
+  }
+  return 0;
+}
+
 int cs_clickContainer (int client_fd) {
 
   int window_id = readVarInt(client_fd);
@@ -660,9 +697,8 @@ int cs_clickContainer (int client_fd) {
     item = readVarInt(client_fd);
     count = (uint8_t)readVarInt(client_fd);
 
-    // ignore components
-    readLengthPrefixedData(client_fd);
-    readLengthPrefixedData(client_fd);
+    // ignore component hashes
+    if (skipHashedComponents(client_fd)) return 1;
 
     if (count > 0 && apply_changes) {
       *p_item = item;
@@ -691,9 +727,8 @@ int cs_clickContainer (int client_fd) {
   if (readByte(client_fd)) {
     player->flagval_16 = readVarInt(client_fd);
     player->flagval_8 = readVarInt(client_fd);
-    // ignore components
-    readLengthPrefixedData(client_fd);
-    readLengthPrefixedData(client_fd);
+    // ignore component hashes
+    skipHashedComponents(client_fd);
   } else {
     player->flagval_16 = 0;
     player->flagval_8 = 0;
@@ -707,7 +742,7 @@ int cs_clickContainer (int client_fd) {
 int sc_setCursorItem (int client_fd, uint16_t item, uint8_t count) {
 
   writeVarInt(client_fd, 1 + sizeVarInt(count) + (count != 0 ? sizeVarInt(item) + 2 : 0));
-  writeByte(client_fd, 0x59);
+  writeByte(client_fd, 0x62);
 
   writeVarInt(client_fd, count);
   if (count == 0) return 0;
@@ -770,28 +805,12 @@ int cs_setPlayerMovementFlags (int client_fd, uint8_t *on_ground) {
   return 0;
 }
 
-// C->S Swing Arm (serverbound)
-int cs_swingArm (int client_fd) {
+// C->S Punch (serverbound)
+// Sent when the player swings their main hand. Has no fields.
+int cs_punch (int client_fd) {
 
   PlayerData *player;
   if (getPlayerData(client_fd, &player)) return 1;
-
-  uint8_t hand = readVarInt(client_fd);
-
-  uint8_t animation = 255;
-  switch (hand) {
-    case 0: {
-      animation = 0;
-      break;
-    }
-    case 1: {
-      animation = 2;
-      break;
-    }
-  }
-
-  if (animation == 255)
-    return 1;
 
   // Forward animation to all connected players
   for (int i = 0; i < MAX_PLAYERS; i ++) {
@@ -801,7 +820,7 @@ int cs_swingArm (int client_fd) {
     if (other_player->client_fd == player->client_fd) continue;
     if (other_player->flags & 0x20) continue;
 
-    sc_entityAnimation(other_player->client_fd, player->client_fd, animation);
+    sc_swingAnimation(other_player->client_fd, player->client_fd);
   }
 
   return 0;
@@ -824,8 +843,8 @@ int cs_setHeldItem (int client_fd) {
 // S->C Set Held Item (clientbound)
 int sc_setHeldItem (int client_fd, uint8_t slot) {
 
-  writeVarInt(client_fd, sizeVarInt(0x62) + 1);
-  writeVarInt(client_fd, 0x62);
+  writeVarInt(client_fd, sizeVarInt(0x6B) + 1);
+  writeVarInt(client_fd, 0x6B);
 
   writeByte(client_fd, slot);
 
@@ -866,7 +885,7 @@ int cs_closeContainer (int client_fd) {
 int sc_playerInfoUpdateAddPlayer (int client_fd, PlayerData player) {
 
   writeVarInt(client_fd, 21 + strlen(player.name)); // Packet length
-  writeByte(client_fd, 0x3F); // Packet ID
+  writeByte(client_fd, 0x47); // Packet ID
 
   writeByte(client_fd, 0x01); // EnumSet: Add Player
   writeByte(client_fd, 1); // Player count (1 per packet)
@@ -890,7 +909,7 @@ int sc_spawnEntity (
   uint8_t yaw, uint8_t pitch
 ) {
 
-  writeVarInt(client_fd, 51 + sizeVarInt(id) + sizeVarInt(type));
+  writeVarInt(client_fd, 46 + sizeVarInt(id) + sizeVarInt(type));
   writeByte(client_fd, 0x01);
 
   writeVarInt(client_fd, id); // Entity ID
@@ -902,6 +921,9 @@ int sc_spawnEntity (
   writeDouble(client_fd, y);
   writeDouble(client_fd, z);
 
+  // Velocity (zero vector is encoded as a single byte)
+  writeByte(client_fd, 0);
+
   // Angles
   writeByte(client_fd, pitch);
   writeByte(client_fd, yaw);
@@ -909,11 +931,6 @@ int sc_spawnEntity (
 
   // Data - mostly unused
   writeByte(client_fd, 0);
-
-  // Velocity
-  writeUint16(client_fd, 0);
-  writeUint16(client_fd, 0);
-  writeUint16(client_fd, 0);
 
   return 0;
 }
@@ -924,7 +941,7 @@ int sc_setEntityMetadata (int client_fd, int id, EntityData *metadata, size_t le
   if (entity_metadata_size == -1) return 1;
 
   writeVarInt(client_fd, 2 + sizeVarInt(id) + entity_metadata_size);
-  writeByte(client_fd, 0x5C);
+  writeByte(client_fd, 0x65);
 
   writeVarInt(client_fd, id); // Entity ID
 
@@ -942,7 +959,7 @@ int sc_setEntityMetadata (int client_fd, int id, EntityData *metadata, size_t le
 int sc_spawnEntityPlayer (int client_fd, PlayerData player) {
   return sc_spawnEntity(
     client_fd,
-    player.client_fd, player.uuid, 149,
+    player.client_fd, player.uuid, E_player,
     player.x > 0 ? (double)player.x + 0.5 : (double)player.x - 0.5,
     player.y,
     player.z > 0 ? (double)player.z + 0.5 : (float)player.z - 0.5,
@@ -961,6 +978,19 @@ int sc_entityAnimation (int client_fd, int id, uint8_t animation) {
   return 0;
 }
 
+// S->C Swing Animation (main hand, default "whack" animation)
+int sc_swingAnimation (int client_fd, int id) {
+  writeVarInt(client_fd, 4 + sizeVarInt(id));
+  writeByte(client_fd, 0x7B);
+
+  writeVarInt(client_fd, id); // Entity ID
+  writeByte(client_fd, 0); // Hand (main hand)
+  writeByte(client_fd, 1); // Animation type (whack)
+  writeByte(client_fd, 6); // Duration in ticks
+
+  return 0;
+}
+
 // S->C Teleport Entity
 int sc_teleportEntity (
   int client_fd, int id,
@@ -969,19 +999,17 @@ int sc_teleportEntity (
 ) {
 
   // Packet length and ID
-  writeVarInt(client_fd, 58 + sizeVarInt(id));
-  writeByte(client_fd, 0x1F);
+  writeVarInt(client_fd, 35 + sizeVarInt(id));
+  writeByte(client_fd, 0x23);
 
   // Entity ID
   writeVarInt(client_fd, id);
+  // Position path type (linear)
+  writeByte(client_fd, 0);
   // Position
   writeDouble(client_fd, x);
   writeDouble(client_fd, y);
   writeDouble(client_fd, z);
-  // Velocity
-  writeUint64(client_fd, 0);
-  writeUint64(client_fd, 0);
-  writeUint64(client_fd, 0);
   // Angles
   writeFloat(client_fd, yaw);
   writeFloat(client_fd, pitch);
@@ -996,7 +1024,7 @@ int sc_setHeadRotation (int client_fd, int id, uint8_t yaw) {
 
   // Packet length and ID
   writeByte(client_fd, 2 + sizeVarInt(id));
-  writeByte(client_fd, 0x4C);
+  writeByte(client_fd, 0x55);
   // Entity ID
   writeVarInt(client_fd, id);
   // Head yaw
@@ -1010,14 +1038,14 @@ int sc_updateEntityRotation (int client_fd, int id, uint8_t yaw, uint8_t pitch) 
 
   // Packet length and ID
   writeByte(client_fd, 4 + sizeVarInt(id));
-  writeByte(client_fd, 0x31);
+  writeByte(client_fd, 0x39);
   // Entity ID
   writeVarInt(client_fd, id);
+  // "On ground" flag
+  writeByte(client_fd, 1);
   // Angles
   writeByte(client_fd, yaw);
   writeByte(client_fd, pitch);
-  // "On ground" flag
-  writeByte(client_fd, 1);
 
   return 0;
 }
@@ -1041,7 +1069,7 @@ int sc_damageEvent (int client_fd, int entity_id, int type) {
 int sc_setHealth (int client_fd, uint8_t health, uint8_t food, uint16_t saturation) {
 
   writeVarInt(client_fd, 9 + sizeVarInt(food));
-  writeByte(client_fd, 0x61);
+  writeByte(client_fd, 0x6A);
 
   writeFloat(client_fd, (float)health);
   writeVarInt(client_fd, food);
@@ -1054,7 +1082,7 @@ int sc_setHealth (int client_fd, uint8_t health, uint8_t food, uint16_t saturati
 int sc_respawn (int client_fd) {
 
   writeVarInt(client_fd, 28);
-  writeByte(client_fd, 0x4B);
+  writeByte(client_fd, 0x54);
 
   // dimension id (from server-sent registries)
   writeVarInt(client_fd, 0);
@@ -1066,8 +1094,8 @@ int sc_respawn (int client_fd) {
   writeUint64(client_fd, 0x0123456789ABCDEF);
   // gamemode
   writeByte(client_fd, GAMEMODE);
-  // previous gamemode
-  writeByte(client_fd, 0xFF);
+  // previous gamemode (0 means none)
+  writeByte(client_fd, 0);
   // is debug
   writeByte(client_fd, 0);
   // is flat
@@ -1105,7 +1133,7 @@ int cs_clientStatus (int client_fd) {
 int sc_systemChat (int client_fd, char* message, uint16_t len) {
 
   writeVarInt(client_fd, 5 + len);
-  writeByte(client_fd, 0x72);
+  writeByte(client_fd, 0x7C);
 
   // String NBT tag
   writeByte(client_fd, 8);
@@ -1230,25 +1258,27 @@ cleanup:
 int cs_interact (int client_fd) {
 
   int entity_id = readVarInt(client_fd);
-  uint8_t type = readByte(client_fd);
 
-  if (type == 2) {
-    // Ignore target coordinates
-    recv_all(client_fd, recv_buffer, 12, false);
-  }
-  if (type != 1) {
-    // Ignore hand
-    recv_all(client_fd, recv_buffer, 1, false);
-  }
-
+  // Ignore hand
+  readVarInt(client_fd);
+  // Ignore target coordinates
+  if (skipLpVec3(client_fd)) return 1;
   // Ignore sneaking flag
-  recv_all(client_fd, recv_buffer, 1, false);
+  readByte(client_fd);
+  if (recv_count == -1) return 1;
 
-  if (type == 0) { // Interact
-    interactEntity(entity_id, client_fd);
-  } else if (type == 1) { // Attack
-    hurtEntity(entity_id, client_fd, D_generic, 1);
-  }
+  interactEntity(entity_id, client_fd);
+
+  return 0;
+}
+
+// C->S Attack
+int cs_attack (int client_fd) {
+
+  int entity_id = readVarInt(client_fd);
+  if (entity_id == VARNUM_ERROR) return 1;
+
+  hurtEntity(entity_id, client_fd, D_generic, 1);
 
   return 0;
 }
@@ -1257,7 +1287,7 @@ int cs_interact (int client_fd) {
 int sc_entityEvent (int client_fd, int entity_id, uint8_t status) {
 
   writeVarInt(client_fd, 6);
-  writeByte(client_fd, 0x1E);
+  writeByte(client_fd, 0x22);
 
   writeUint32(client_fd, entity_id);
   writeByte(client_fd, status);
@@ -1269,7 +1299,7 @@ int sc_entityEvent (int client_fd, int entity_id, uint8_t status) {
 int sc_removeEntity (int client_fd, int entity_id) {
 
   writeVarInt(client_fd, 2 + sizeVarInt(entity_id));
-  writeByte(client_fd, 0x46);
+  writeByte(client_fd, 0x4E);
 
   writeByte(client_fd, 1);
   writeVarInt(client_fd, entity_id);
@@ -1317,7 +1347,7 @@ int cs_playerCommand (int client_fd) {
 int sc_pickupItem (int client_fd, int collected, int collector, uint8_t count) {
 
   writeVarInt(client_fd, 1 + sizeVarInt(collected) + sizeVarInt(collector) + sizeVarInt(count));
-  writeByte(client_fd, 0x75);
+  writeByte(client_fd, 0x7F);
 
   writeVarInt(client_fd, collected);
   writeVarInt(client_fd, collector);

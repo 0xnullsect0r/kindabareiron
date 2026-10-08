@@ -52,3 +52,41 @@ void writeVarInt (int client_fd, uint32_t value) {
     value >>= 7;
   }
 }
+
+int sizeVarLong (uint64_t value) {
+  int size = 1;
+  while ((value & ~(uint64_t)SEGMENT_BITS) != 0) {
+    value >>= 7;
+    size ++;
+  }
+  return size;
+}
+
+void writeVarLong (int client_fd, uint64_t value) {
+  while (true) {
+    if ((value & ~(uint64_t)SEGMENT_BITS) == 0) {
+      writeByte(client_fd, value);
+      return;
+    }
+
+    writeByte(client_fd, (value & SEGMENT_BITS) | CONTINUE_BIT);
+
+    value >>= 7;
+  }
+}
+
+// Reads and discards a low-precision Vec3 ("LpVec3")
+// A zero vector is a single 0 byte, otherwise it takes 6 bytes,
+// followed by a VarInt if the scale doesn't fit in 2 bits
+int skipLpVec3 (int client_fd) {
+  uint8_t lowest = readByte(client_fd);
+  if (recv_count != 1) return 1;
+  if (lowest == 0) return 0;
+  readByte(client_fd);
+  readUint32(client_fd);
+  if (recv_count == -1) return 1;
+  if (lowest & 4) {
+    if (readVarInt(client_fd) == VARNUM_ERROR) return 1;
+  }
+  return 0;
+}
